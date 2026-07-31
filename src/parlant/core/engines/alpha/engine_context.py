@@ -141,6 +141,25 @@ class Interaction:
         return self.events
 
 
+def is_premoderation_required(context: EngineContext) -> bool:
+    for event in reversed(context.interaction.events):
+        if event.kind != EventKind.MESSAGE or event.source != EventSource.CUSTOMER:
+            continue
+
+        metadata = event.metadata if isinstance(event.metadata, dict) else {}
+        if "_impact_private" not in metadata:
+            return False
+
+        private_metadata = metadata.get("_impact_private")
+        if not isinstance(private_metadata, dict):
+            return True
+
+        cycle = private_metadata.get("impact_cycle_v1")
+        return not isinstance(cycle, dict) or cycle.get("premoderation_required") is not False
+
+    return False
+
+
 @dataclass(frozen=False)
 class ResponseState:
     """Used to access and update the state needed for responding properly"""

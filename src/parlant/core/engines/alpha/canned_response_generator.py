@@ -179,6 +179,13 @@ class _CannedResponseSelectionResult:
     chosen_canned_responses: list[tuple[CannedResponseId, str]]
 
 
+@dataclass(frozen=True)
+class _PreparedCannedMessage:
+    data: MessageEventData
+    metadata: Mapping[str, JSONSerializable] | None
+    delay_before: float = 0.0
+
+
 @dataclass
 class CannedResponseContext:
     start_of_processing: Stopwatch
@@ -1054,116 +1061,91 @@ You will now be given the current state of the interaction to which you must gen
                     "Agent is configured for streaming message output, but no streaming text generator is available in active NLP Service. Falling back to standard response generation."
                 )
 
-        first_message_already_emitted = False
-
-        async def output_messages(
+        async def prepare_messages(
             generation_result: _CannedResponseSelectionResult,
+        ) -> list[_PreparedCannedMessage]:
+            policy = self._perceived_performance_policy_provider.get_policy(context.agent.id)
+            event_metadata = get_canrep_metadata(generation_result)
+
+            if await policy.is_message_splitting_required(
+                loaded_context, generation_result.message
+            ):
+                sub_messages = generation_result.message.strip().split("\n\n")
+            else:
+                sub_messages = [generation_result.message.strip()]
+
+            prepared: list[_PreparedCannedMessage] = []
+            for message in sub_messages:
+                if not await self._hooks.call_on_message_generated(loaded_context, payload=message):
+                    return []
+
+                data = (
+                    MessageEventData(
+                        message=message,
+                        participant=Participant(
+                            id=context.agent.id, display_name=context.agent.name
+                        ),
+                        draft=generation_result.draft,
+                        canned_responses=generation_result.chosen_canned_responses,
+                    )
+                    if generation_result.draft
+                    else MessageEventData(
+                        message=message,
+                        participant=Participant(
+                            id=context.agent.id, display_name=context.agent.name
+                        ),
+                    )
+                )
+                prepared.append(_PreparedCannedMessage(data=data, metadata=event_metadata))
+
+            return prepared
+
+        async def emit_messages(
+            prepared_messages: Sequence[_PreparedCannedMessage],
         ) -> list[EmittedEvent]:
-            nonlocal first_message_already_emitted
             emitted_events: list[EmittedEvent] = []
-            if generation_result is not None:
-                policy = self._perceived_performance_policy_provider.get_policy(context.agent.id)
-                event_metadata = get_canrep_metadata(generation_result)
 
-                if await policy.is_message_splitting_required(
-                    loaded_context, generation_result.message
-                ):
-                    sub_messages = generation_result.message.strip().split("\n\n")
-                else:
-                    sub_messages = [generation_result.message.strip()]
-
-                while sub_messages:
-                    m = sub_messages.pop(0)
-
-                    if await self._hooks.call_on_message_generated(loaded_context, payload=m):
-                        # If we're in, the hook did not bail out.
-
-                        handle = await context.event_emitter.emit_message_event(
-                            trace_id=self._tracer.trace_id,
-                            data=MessageEventData(
-                                message=m,
-                                participant=Participant(
-                                    id=context.agent.id, display_name=context.agent.name
-                                ),
-                                draft=generation_result.draft,
-                                canned_responses=generation_result.chosen_canned_responses,
-                            )
-                            if generation_result.draft
-                            else MessageEventData(
-                                message=m,
-                                participant=Participant(
-                                    id=context.agent.id, display_name=context.agent.name
-                                ),
-                            ),
-                            metadata=event_metadata,
-                        )
-                        if not first_message_already_emitted:
-                            await self._hist_ttfm_duration.record(
-                                context.start_of_processing.elapsed * 1000
-                            )
-                            self._tracer.add_event("canrep.ttfm")
-                            first_message_already_emitted = True
-
-                        emitted_events.append(handle.event)
-
-                        await context.event_emitter.emit_status_event(
-                            trace_id=self._tracer.trace_id,
-                            data={
-                                "status": "ready",
-                                "data": {},
-                            },
-                        )
+            for index, prepared in enumerate(prepared_messages):
+                if index > 0:
+                    await context.event_emitter.emit_status_event(
+                        trace_id=self._tracer.trace_id,
+                        data={"status": "typing", "data": {}},
+                    )
+                    if prepared.delay_before > 0:
+                        await asyncio.sleep(prepared.delay_before)
                     else:
-                        await context.event_emitter.emit_status_event(
-                            trace_id=self._tracer.trace_id,
-                            data={
-                                "status": "ready",
-                                "data": {},
-                            },
-                        )
-
-                        return []
-
-                    if next_message := sub_messages[0] if sub_messages else None:
-                        policy = self._perceived_performance_policy_provider.get_policy(
-                            context.agent.id
-                        )
-
-                        await policy.get_follow_up_delay()
-
-                        await context.event_emitter.emit_status_event(
-                            trace_id=self._tracer.trace_id,
-                            data={
-                                "status": "typing",
-                                "data": {},
-                            },
-                        )
-
+                        previous_message = prepared_messages[index - 1].data["message"]
+                        current_message = prepared.data["message"]
                         typing_speed_in_words_per_minute = 50
-
-                        initial_delay = 0.0
-
-                        word_count_for_the_message_that_was_just_sent = len(m.split())
-
-                        if word_count_for_the_message_that_was_just_sent <= 10:
-                            initial_delay += 0.5
-                        else:
-                            initial_delay += (
-                                word_count_for_the_message_that_was_just_sent
-                                / typing_speed_in_words_per_minute
-                            ) * 2
-
-                        word_count_for_next_message = len(next_message.split())
-
-                        if word_count_for_next_message <= 10:
-                            initial_delay += 1
-                        else:
-                            initial_delay += 2
-
-                        await asyncio.sleep(
-                            initial_delay
-                            + (word_count_for_next_message / typing_speed_in_words_per_minute)
+                        previous_word_count = len(previous_message.split())
+                        current_word_count = len(current_message.split())
+                        initial_delay = (
+                            0.5
+                            if previous_word_count <= 10
+                            else (previous_word_count / typing_speed_in_words_per_minute) * 2
                         )
+                        initial_delay += 1 if current_word_count <= 10 else 2
+                        await asyncio.sleep(
+                            initial_delay + (current_word_count / typing_speed_in_words_per_minute)
+                        )
+
+                handle = await context.event_emitter.emit_message_event(
+                    trace_id=self._tracer.trace_id,
+                    data=prepared.data,
+                    metadata=prepared.metadata,
+                )
+                if index == 0:
+                    await self._hist_ttfm_duration.record(
+                        context.start_of_processing.elapsed * 1000
+                    )
+                    self._tracer.add_event("canrep.ttfm")
+
+                emitted_events.append(handle.event)
+                await context.event_emitter.emit_status_event(
+                    trace_id=self._tracer.trace_id,
+                    data={"status": "ready", "data": {}},
+                )
+
             return emitted_events
 
         def get_canrep_metadata(
@@ -1203,7 +1185,7 @@ You will now be given the current state of the interaction to which you must gen
         last_generation_exception: Exception | None = None
         generation_result: _CannedResponseSelectionResult | None = None
         generation_info: Mapping[str, GenerationInfo] = {}
-        events: list[EmittedEvent] = []
+        prepared_messages: list[_PreparedCannedMessage] = []
 
         for generation_attempt in range(3):
             try:
@@ -1219,12 +1201,17 @@ You will now be given the current state of the interaction to which you must gen
                     latch.enable()
 
                 if generation_result:
-                    emitted_events = await output_messages(generation_result)
-                    events += emitted_events
-
-                    context.staged_message_events = (
-                        list(context.staged_message_events) + emitted_events
-                    )
+                    prepared_messages = await prepare_messages(generation_result)
+                    context.staged_message_events = list(context.staged_message_events) + [
+                        EmittedEvent(
+                            source=EventSource.AI_AGENT,
+                            kind=EventKind.MESSAGE,
+                            trace_id=self._tracer.trace_id,
+                            data=cast(JSONSerializable, prepared.data),
+                            metadata=prepared.metadata,
+                        )
+                        for prepared in prepared_messages
+                    ]
 
                     break
 
@@ -1251,35 +1238,51 @@ You will now be given the current state of the interaction to which you must gen
                     )
 
                     if follow_up_canrep_response:
-                        await context.event_emitter.emit_status_event(
-                            trace_id=self._tracer.trace_id,
-                            data={
-                                "status": "typing",
-                                "data": {},
-                            },
-                        )
-
                         policy = self._perceived_performance_policy_provider.get_policy(
                             context.agent.id
                         )
-
-                        await asyncio.sleep(await policy.get_follow_up_delay())
-
-                        follow_up_response_events = await output_messages(follow_up_canrep_response)
-                        events += follow_up_response_events
-
-                        if not follow_up_response_events:
+                        follow_up_messages = await prepare_messages(follow_up_canrep_response)
+                        if follow_up_messages:
+                            first = follow_up_messages[0]
+                            follow_up_messages[0] = _PreparedCannedMessage(
+                                data=first.data,
+                                metadata=first.metadata,
+                                delay_before=await policy.get_follow_up_delay(),
+                            )
+                            prepared_messages += follow_up_messages
+                        else:
                             self._logger.trace(
                                 "Skipping follow up response; no additional response deemed necessary"
                             )
 
+                    if not await self._hooks.call_on_message_batch_generated(
+                        loaded_context,
+                        [prepared.data for prepared in prepared_messages],
+                    ):
+                        return [
+                            MessageEventComposition(
+                                {**generation_info, **follow_up_canrep_generation_info}, []
+                            )
+                        ]
+
+                    events = await emit_messages(prepared_messages)
                     return [
                         MessageEventComposition(
                             {**generation_info, **follow_up_canrep_generation_info}, events
                         )
                     ]
 
-                return [MessageEventComposition({**generation_info}, events)]
+                if not await self._hooks.call_on_message_batch_generated(
+                    loaded_context,
+                    [prepared.data for prepared in prepared_messages],
+                ):
+                    return [MessageEventComposition({**generation_info}, [])]
+
+                return [
+                    MessageEventComposition(
+                        {**generation_info}, await emit_messages(prepared_messages)
+                    )
+                ]
 
             except Exception as exc:
                 self._logger.warning(

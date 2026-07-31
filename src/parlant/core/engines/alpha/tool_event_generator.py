@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Mapping, Optional, Sequence
 from parlant.core.customers import Customer
-from parlant.core.engines.alpha.engine_context import EngineContext
+from parlant.core.engines.alpha.engine_context import EngineContext, is_premoderation_required
 from parlant.core.meter import Meter
 from parlant.core.tools import ToolContext
 from parlant.core.tracer import Tracer
@@ -163,6 +163,7 @@ class ToolEventGenerator:
                 agent_id=context.agent.id,
                 session_id=context.session.id,
                 customer_id=context.customer.id,
+                premoderation_required=is_premoderation_required(context),
             )
 
             async with self._hist_tool_call_execution_duration.measure():

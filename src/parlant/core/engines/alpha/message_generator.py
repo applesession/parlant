@@ -46,6 +46,7 @@ from parlant.core.journeys import Journey
 from parlant.core.nlp.generation import SchematicGenerator
 from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
+from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.glossary import Term
 from parlant.core.emissions import EmittedEvent, EventEmitter
@@ -53,6 +54,7 @@ from parlant.core.sessions import (
     Event,
     EventKind,
     EventSource,
+    MessageEventData,
     Session,
 )
 from parlant.core.common import DefaultBaseModel
@@ -134,6 +136,7 @@ class MessageGenerator(MessageEventComposer):
         logger: Logger,
         meter: Meter,
         tracer: Tracer,
+        hooks: EngineHooks,
         optimization_policy: OptimizationPolicy,
         schematic_generator: SchematicGenerator[MessageSchema],
     ) -> None:
@@ -141,6 +144,7 @@ class MessageGenerator(MessageEventComposer):
         self._meter = meter
 
         self._tracer = tracer
+        self._hooks = hooks
         self._optimization_policy = optimization_policy
         self._schematic_generator = schematic_generator
 
@@ -173,6 +177,7 @@ class MessageGenerator(MessageEventComposer):
                 with self._logger.scope("Message generation"):
                     async with self._hist_message_generation_duration.measure():
                         return await self._do_generate_events(
+                            engine_context=context,
                             start_of_processing=context.creation,
                             event_emitter=context.session_event_emitter,
                             agent=context.agent,
@@ -207,6 +212,7 @@ class MessageGenerator(MessageEventComposer):
 
     async def _do_generate_events(
         self,
+        engine_context: EngineContext,
         start_of_processing: Stopwatch,
         event_emitter: EventEmitter,
         agent: Agent,
@@ -276,6 +282,14 @@ class MessageGenerator(MessageEventComposer):
                     latch.enable()
 
                 if response_message is not None:
+                    if not await self._hooks.call_on_message_batch_generated(
+                        engine_context,
+                        [cast(MessageEventData, response_message)],
+                    ):
+                        return [
+                            MessageEventComposition({"message_generation": generation_info}, [])
+                        ]
+
                     handle = await event_emitter.emit_message_event(
                         trace_id=self._tracer.trace_id,
                         data=response_message,
@@ -291,6 +305,7 @@ class MessageGenerator(MessageEventComposer):
                     ]
                 else:
                     self._logger.debug("Skipping response; no response deemed necessary")
+                    await self._hooks.call_on_message_batch_generated(engine_context, [])
                     return [MessageEventComposition({"message_generation": generation_info}, [])]
             except Exception as exc:
                 self._logger.warning(
