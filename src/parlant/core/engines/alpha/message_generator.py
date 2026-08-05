@@ -55,6 +55,7 @@ from parlant.core.sessions import (
     EventKind,
     EventSource,
     MessageEventData,
+    Participant,
     Session,
 )
 from parlant.core.common import DefaultBaseModel
@@ -282,9 +283,13 @@ class MessageGenerator(MessageEventComposer):
                     latch.enable()
 
                 if response_message is not None:
+                    message_data = MessageEventData(
+                        message=response_message,
+                        participant=Participant(id=agent.id, display_name=agent.name),
+                    )
                     if not await self._hooks.call_on_message_batch_generated(
                         engine_context,
-                        [cast(MessageEventData, response_message)],
+                        [message_data],
                     ):
                         return [
                             MessageEventComposition({"message_generation": generation_info}, [])
@@ -292,7 +297,7 @@ class MessageGenerator(MessageEventComposer):
 
                     handle = await event_emitter.emit_message_event(
                         trace_id=self._tracer.trace_id,
-                        data=response_message,
+                        data=message_data,
                     )
 
                     await self._hist_ttfm_duration.record(start_of_processing.elapsed * 1000)

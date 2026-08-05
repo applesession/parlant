@@ -302,6 +302,36 @@ async def test_that_a_plugin_tool_can_emit_events(
             assert result.data == {"number": 123}
 
 
+async def test_that_premoderation_blocks_plugin_direct_message_emit(
+    tool_context: ToolContext,
+    container: Container,
+) -> None:
+    @tool
+    async def my_tool(context: ToolContext) -> ToolResult:
+        await context.emit_message("must not escape")
+        return ToolResult({"status": "unexpected"})
+
+    buffers = SessionBuffers(container[AgentStore])
+    premoderated_context = ToolContext(
+        agent_id=tool_context.agent_id,
+        session_id=tool_context.session_id,
+        customer_id=tool_context.customer_id,
+        premoderation_required=True,
+    )
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, event_emitter_factory=buffers) as client:
+            with pytest.raises(ToolExecutionError):
+                await client.call_tool(
+                    my_tool.tool.name,
+                    premoderated_context,
+                    arguments={},
+                )
+
+    buffer = buffers.for_session.get(SessionId(tool_context.session_id))
+    assert buffer is None or not [event for event in buffer.events if event.kind == EventKind.MESSAGE]
+
+
 async def test_that_a_plugin_tool_can_emit_events_and_ultimately_fail_with_an_error(
     tool_context: ToolContext,
     container: Container,

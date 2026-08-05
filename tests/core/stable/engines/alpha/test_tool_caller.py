@@ -19,9 +19,11 @@ from typing import Annotated, Any, Mapping, Optional, Sequence, List, cast
 import uuid
 from pathlib import Path
 from lagom import Container
+import pytest
 from pytest import fixture
 from typing_extensions import override
 from ast import literal_eval
+from unittest.mock import AsyncMock
 
 from parlant.core.agents import Agent
 from parlant.core.common import Criticality, generate_id
@@ -176,6 +178,67 @@ async def _inference_tool_calls_result(
     )
 
     return await tool_caller.infer_tool_calls(tool_call_context)
+
+
+@pytest.mark.parametrize(
+    ("consequential", "premoderation_required", "expected_call_count"),
+    [
+        (True, True, 0),
+        (False, True, 1),
+        (True, False, 1),
+    ],
+)
+async def test_that_premoderation_blocks_only_consequential_tool_execution(
+    container: Container,
+    monkeypatch: pytest.MonkeyPatch,
+    consequential: bool,
+    premoderation_required: bool,
+    expected_call_count: int,
+) -> None:
+    tool_caller = container[ToolCaller]
+    service_registry = container[ServiceRegistry]
+    service = AsyncMock()
+    resolved_tool = Tool(
+        name="mutate_external_state",
+        creation_utc=datetime.now(timezone.utc),
+        description="",
+        metadata={},
+        parameters={},
+        required=[],
+        consequential=consequential,
+        overlap=ToolOverlap.AUTO,
+    )
+    service.resolve_tool.return_value = resolved_tool
+    service.call_tool.return_value = ToolResult("executed")
+    monkeypatch.setattr(
+        service_registry,
+        "read_tool_service",
+        AsyncMock(return_value=service),
+    )
+    tool_call = ToolCall(
+        id=ToolCallId(generate_id()),
+        tool_id=ToolId(service_name="test", tool_name=resolved_tool.name),
+        arguments={},
+    )
+    context = ToolContext(
+        agent_id="agent",
+        session_id="session",
+        customer_id="customer",
+        premoderation_required=premoderation_required,
+    )
+
+    results = await tool_caller.execute_tool_calls(context, [tool_call])
+
+    assert service.call_tool.await_count == expected_call_count
+    assert len(results) == 1
+    if expected_call_count == 0:
+        assert results[0].result["data"] == {
+            "status": "blocked",
+            "code": "premoderation_tool_blocked",
+        }
+        assert results[0].result["metadata"] == {"code": "premoderation_tool_blocked"}
+    else:
+        assert results[0].result["data"] == "executed"
 
 
 async def test_that_a_tool_from_a_local_service_gets_called_with_an_enum_parameter(
