@@ -29,10 +29,12 @@ from parlant.core.sessions import Event, SessionId, ToolEventData
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.glossary import Term
 from parlant.core.engines.alpha.tool_calling.tool_caller import (
+    ToolCall,
     ToolCallContext,
     ToolCaller,
     ToolInsights,
 )
+from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.emissions import EmittedEvent, EventEmitter
 from parlant.core.tools import ToolId
 
@@ -42,6 +44,7 @@ class ToolEventGenerationResult:
     generations: Sequence[GenerationInfo]
     events: Sequence[Optional[EmittedEvent]]
     insights: ToolInsights
+    halted: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,12 +69,14 @@ class ToolEventGenerator:
         tracer: Tracer,
         tool_caller: ToolCaller,
         service_registry: ServiceRegistry,
+        hooks: EngineHooks,
     ) -> None:
         self._logger = logger
         self._tracer = tracer
         self._meter = meter
         self._service_registry = service_registry
         self._tool_caller = tool_caller
+        self._hooks = hooks
 
         self._hist_tool_call_duration = self._meter.create_duration_histogram(
             "tc",
@@ -166,13 +171,51 @@ class ToolEventGenerator:
                 premoderation_required=is_premoderation_required(context),
             )
 
+            halted = False
+            calls_to_execute: Sequence[ToolCall] = tool_calls
+            ordinary_results = []
+            if is_premoderation_required(context):
+                ordinary_calls: list[ToolCall] = []
+                consequential_calls: list[ToolCall] = []
+                for tool_call in tool_calls:
+                    service = await self._service_registry.read_tool_service(
+                        tool_call.tool_id.service_name
+                    )
+                    descriptor = await service.resolve_tool(tool_call.tool_id.tool_name, tool_context)
+                    (consequential_calls if descriptor.consequential else ordinary_calls).append(tool_call)
+
+                async with self._hist_tool_call_execution_duration.measure():
+                    ordinary_results = list(
+                        await self._tool_caller.execute_tool_calls(tool_context, ordinary_calls)
+                    )
+
+                calls_to_execute = consequential_calls
+                if consequential_calls:
+                    if not await self._hooks.call_on_consequential_tool_batch_generated(
+                        context, consequential_calls
+                    ):
+                        halted = True
+                        calls_to_execute = []
+                    else:
+                        calls_to_execute = consequential_calls
+
             async with self._hist_tool_call_execution_duration.measure():
-                tool_results = await self._tool_caller.execute_tool_calls(
-                    tool_context,
-                    tool_calls,
+                consequential_results = (
+                    await self._tool_caller.execute_tool_calls(tool_context, calls_to_execute)
+                    if calls_to_execute
+                    else []
                 )
 
-            if not tool_results:
+            results_by_call_id = {
+                result.tool_call.id: result for result in [*ordinary_results, *consequential_results]
+            }
+            tool_results = [
+                results_by_call_id[tool_call.id]
+                for tool_call in tool_calls
+                if tool_call.id in results_by_call_id
+            ]
+
+            if not tool_results and not halted:
                 return ToolEventGenerationResult(
                     generations=inference_result.batch_generations,
                     events=[],
@@ -209,4 +252,5 @@ class ToolEventGenerator:
                 generations=inference_result.batch_generations,
                 events=events,
                 insights=inference_result.insights,
+                halted=halted,
             )

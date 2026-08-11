@@ -616,6 +616,21 @@ class AlphaEngine(Engine):
 
             self._add_tool_events_to_tracer(new_tool_events)
 
+            if tool_event_generation_result.halted:
+                return _PreparationIterationResult(
+                    state=IterationState(
+                        matched_guidelines=guideline_and_journey_matching_result.matches_guidelines,
+                        resolved_guidelines=guideline_and_journey_matching_result.resolved_guidelines,
+                        tool_insights=tool_insights,
+                        executed_tools=[
+                            ToolId.from_string(tool_call["tool_id"])
+                            for tool_event in new_tool_events
+                            for tool_call in cast(ToolEventData, tool_event.data)["tool_calls"]
+                        ],
+                    ),
+                    resolution=_PreparationIterationResolution.BAIL,
+                )
+
         else:
             new_tool_events = []
 
@@ -706,6 +721,21 @@ class AlphaEngine(Engine):
             )
 
             self._add_tool_events_to_tracer(new_tool_events)
+
+            if tool_event_generation_result.halted:
+                return _PreparationIterationResult(
+                    state=IterationState(
+                        matched_guidelines=guideline_and_journey_matching_result.matches_guidelines,
+                        resolved_guidelines=guideline_and_journey_matching_result.resolved_guidelines,
+                        tool_insights=tool_insights,
+                        executed_tools=[
+                            ToolId.from_string(tool_call["tool_id"])
+                            for tool_event in new_tool_events
+                            for tool_call in cast(ToolEventData, tool_event.data)["tool_calls"]
+                        ],
+                    ),
+                    resolution=_PreparationIterationResolution.BAIL,
+                )
 
         else:
             new_tool_events = []

@@ -180,20 +180,11 @@ async def _inference_tool_calls_result(
     return await tool_caller.infer_tool_calls(tool_call_context)
 
 
-@pytest.mark.parametrize(
-    ("consequential", "premoderation_required", "expected_call_count"),
-    [
-        (True, True, 0),
-        (False, True, 1),
-        (True, False, 1),
-    ],
-)
-async def test_that_premoderation_blocks_only_consequential_tool_execution(
+@pytest.mark.parametrize("consequential", [True, False])
+async def test_that_tool_caller_leaves_premoderation_policy_to_batch_orchestration(
     container: Container,
     monkeypatch: pytest.MonkeyPatch,
     consequential: bool,
-    premoderation_required: bool,
-    expected_call_count: int,
 ) -> None:
     tool_caller = container[ToolCaller]
     service_registry = container[ServiceRegistry]
@@ -224,21 +215,14 @@ async def test_that_premoderation_blocks_only_consequential_tool_execution(
         agent_id="agent",
         session_id="session",
         customer_id="customer",
-        premoderation_required=premoderation_required,
+        premoderation_required=True,
     )
 
     results = await tool_caller.execute_tool_calls(context, [tool_call])
 
-    assert service.call_tool.await_count == expected_call_count
+    assert service.call_tool.await_count == 1
     assert len(results) == 1
-    if expected_call_count == 0:
-        assert results[0].result["data"] == {
-            "status": "blocked",
-            "code": "premoderation_tool_blocked",
-        }
-        assert results[0].result["metadata"] == {"code": "premoderation_tool_blocked"}
-    else:
-        assert results[0].result["data"] == "executed"
+    assert results[0].result["data"] == "executed"
 
 
 async def test_that_a_tool_from_a_local_service_gets_called_with_an_enum_parameter(

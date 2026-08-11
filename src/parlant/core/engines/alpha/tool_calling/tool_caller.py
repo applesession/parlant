@@ -277,25 +277,6 @@ class ToolCaller:
 
             try:
                 service = await self._service_registry.read_tool_service(tool_id.service_name)
-                tool = await service.resolve_tool(tool_id.tool_name, context)
-
-                if context.premoderation_required and tool.consequential:
-                    return ToolCallResult(
-                        id=ToolResultId(generate_id()),
-                        tool_call=tool_call,
-                        result={
-                            "data": {
-                                "status": "blocked",
-                                "code": "premoderation_tool_blocked",
-                            },
-                            "metadata": {"code": "premoderation_tool_blocked"},
-                            "control": {},
-                            "canned_responses": [],
-                            "canned_response_fields": {},
-                            "guidelines": [],
-                        },
-                    )
-
                 result = await service.call_tool(
                     tool_id.tool_name,
                     context,

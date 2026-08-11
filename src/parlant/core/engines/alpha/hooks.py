@@ -23,6 +23,7 @@ from parlant.core.guidelines import GuidelineId
 from parlant.core.journeys import JourneyId
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.sessions import MessageEventData
+from parlant.core.engines.alpha.tool_calling.tool_caller import ToolCall
 
 
 class EngineHookResult(Enum):
@@ -92,6 +93,9 @@ class EngineHooks:
     on_message_batch_generated: list[EngineHook] = field(default_factory=list)
     """Called once after a BLOCK message batch was generated, before any message is emitted"""
 
+    on_consequential_tool_batch_generated: list[EngineHook] = field(default_factory=list)
+    """Called after consequential tool inference and before any consequential invocation"""
+
     on_messages_emitted: list[EngineHook] = field(default_factory=list)
     """Called right after all messages were emitted into the session"""
 
@@ -155,6 +159,11 @@ class EngineHooks:
         self, context: EngineContext, payload: Sequence[MessageEventData]
     ) -> bool:
         return await self.call_hooks(self.on_message_batch_generated, context, payload)
+
+    async def call_on_consequential_tool_batch_generated(
+        self, context: EngineContext, payload: Sequence[ToolCall]
+    ) -> bool:
+        return await self.call_hooks(self.on_consequential_tool_batch_generated, context, payload)
 
     async def call_on_messages_emitted(self, context: EngineContext) -> bool:
         return await self.call_hooks(self.on_messages_emitted, context, None)

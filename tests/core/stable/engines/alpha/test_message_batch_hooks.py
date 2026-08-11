@@ -26,12 +26,21 @@ from parlant.core.engines.alpha.engine_context import (
 )
 from parlant.core.engines.alpha.hooks import EngineHookResult, EngineHooks
 from parlant.core.engines.alpha.message_generator import MessageGenerator
-from parlant.core.engines.alpha.tool_calling.tool_caller import ToolInsights
+from parlant.core.engines.alpha.tool_calling.tool_caller import (
+    ToolCall,
+    ToolCallId,
+    ToolCallInferenceResult,
+    ToolCallResult,
+    ToolCaller,
+    ToolInsights,
+    ToolResultId,
+)
+from parlant.core.engines.alpha.tool_event_generator import ToolEventGenerator
 from parlant.core.engines.types import Context
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
 from parlant.core.sessions import EventKind, EventSource, MessageEventData, SessionStore
-from parlant.core.tools import ToolContext, ToolError
+from parlant.core.tools import ToolContext, ToolError, ToolId
 from parlant.core.tracer import Tracer
 
 from tests.core.common.utils import create_event_message
@@ -325,3 +334,112 @@ async def test_that_premoderation_blocks_direct_tool_message_emit() -> None:
         await context.emit_message("must not escape")
 
     assert emitted == []
+
+
+@pytest.mark.parametrize(
+    ("hook_result", "expected_execution_batches", "expected_tool_events", "halted"),
+    [
+        (EngineHookResult.BAIL, [["safe"]], 1, True),
+        (EngineHookResult.CALL_NEXT, [["safe"], ["dangerous"]], 2, False),
+    ],
+)
+async def test_that_consequential_batch_is_held_before_execution(
+    container: Container,
+    agent: Agent,
+    monkeypatch: pytest.MonkeyPatch,
+    hook_result: EngineHookResult,
+    expected_execution_batches: list[list[str]],
+    expected_tool_events: int,
+    halted: bool,
+) -> None:
+    context, event_buffer = await _engine_context(
+        container,
+        agent,
+        {
+            "_impact_private": {
+                "impact_cycle_v1": {"premoderation_required": True}
+            }
+        },
+    )
+    safe_call = ToolCall(
+        id=ToolCallId("safe-call"),
+        tool_id=ToolId(service_name="local", tool_name="safe"),
+        arguments={"value": 1},
+    )
+    dangerous_call = ToolCall(
+        id=ToolCallId("dangerous-call"),
+        tool_id=ToolId(service_name="local", tool_name="dangerous"),
+        arguments={"value": 2},
+    )
+    context.state.tool_enabled_guideline_matches = {
+        cast(Any, object()): [safe_call.tool_id, dangerous_call.tool_id]
+    }
+    generator = container[ToolEventGenerator]
+    tool_caller = container[ToolCaller]
+    hooks = container[EngineHooks]
+    service = AsyncMock()
+    service.resolve_tool.side_effect = lambda name, _: Mock(consequential=name == "dangerous")
+    monkeypatch.setattr(
+        generator._service_registry,
+        "read_tool_service",
+        AsyncMock(return_value=service),
+    )
+    monkeypatch.setattr(
+        tool_caller,
+        "infer_tool_calls",
+        AsyncMock(
+            return_value=ToolCallInferenceResult(
+                total_duration=0,
+                batch_count=1,
+                batch_generations=[],
+                batches=[[safe_call, dangerous_call]],
+                insights=ToolInsights(),
+            )
+        ),
+    )
+    execution_batches: list[list[str]] = []
+
+    async def execute_calls(
+        tool_context: ToolContext, calls: list[ToolCall]
+    ) -> list[ToolCallResult]:
+        execution_batches.append([call.tool_id.tool_name for call in calls])
+        return [
+            ToolCallResult(
+                id=ToolResultId(f"result-{call.id}"),
+                tool_call=call,
+                result=cast(
+                    Any,
+                    {
+                        "data": "ok",
+                        "metadata": {},
+                        "control": {},
+                        "canned_responses": [],
+                        "canned_response_fields": {},
+                        "guidelines": [],
+                    },
+                ),
+            )
+            for call in calls
+        ]
+
+    monkeypatch.setattr(tool_caller, "execute_tool_calls", execute_calls)
+    received: list[list[ToolCall]] = []
+
+    async def handler(
+        context: EngineContext,
+        payload: list[ToolCall],
+        exc: Exception | None,
+    ) -> EngineHookResult:
+        received.append(payload)
+        assert execution_batches == [["safe"]]
+        return hook_result
+
+    hooks.on_consequential_tool_batch_generated.append(handler)
+
+    result = await generator.generate_events(cast(Any, None), context)
+
+    assert received == [[dangerous_call]]
+    assert execution_batches == expected_execution_batches
+    assert result.halted is halted
+    assert len([event for event in event_buffer.events if event.kind == EventKind.TOOL]) == expected_tool_events
+    assert not [event for event in event_buffer.events if event.kind == EventKind.MESSAGE]
