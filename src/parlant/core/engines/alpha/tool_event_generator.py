@@ -34,7 +34,7 @@ from parlant.core.engines.alpha.tool_calling.tool_caller import (
     ToolCaller,
     ToolInsights,
 )
-from parlant.core.engines.alpha.hooks import EngineHooks
+from parlant.core.engines.alpha.hooks import EngineHooks, ToolBatchExecution
 from parlant.core.emissions import EmittedEvent, EventEmitter
 from parlant.core.tools import ToolId
 
@@ -173,47 +173,29 @@ class ToolEventGenerator:
 
             halted = False
             calls_to_execute: Sequence[ToolCall] = tool_calls
-            ordinary_results = []
             if is_premoderation_required(context):
-                ordinary_calls: list[ToolCall] = []
                 consequential_calls: list[ToolCall] = []
                 for tool_call in tool_calls:
                     service = await self._service_registry.read_tool_service(
                         tool_call.tool_id.service_name
                     )
                     descriptor = await service.resolve_tool(tool_call.tool_id.tool_name, tool_context)
-                    (consequential_calls if descriptor.consequential else ordinary_calls).append(tool_call)
+                    if descriptor.consequential:
+                        consequential_calls.append(tool_call)
 
-                async with self._hist_tool_call_execution_duration.measure():
-                    ordinary_results = list(
-                        await self._tool_caller.execute_tool_calls(tool_context, ordinary_calls)
-                    )
-
-                calls_to_execute = consequential_calls
                 if consequential_calls:
                     if not await self._hooks.call_on_consequential_tool_batch_generated(
                         context, consequential_calls
                     ):
                         halted = True
                         calls_to_execute = []
-                    else:
-                        calls_to_execute = consequential_calls
 
             async with self._hist_tool_call_execution_duration.measure():
-                consequential_results = (
+                tool_results = list(
                     await self._tool_caller.execute_tool_calls(tool_context, calls_to_execute)
                     if calls_to_execute
                     else []
                 )
-
-            results_by_call_id = {
-                result.tool_call.id: result for result in [*ordinary_results, *consequential_results]
-            }
-            tool_results = [
-                results_by_call_id[tool_call.id]
-                for tool_call in tool_calls
-                if tool_call.id in results_by_call_id
-            ]
 
             if not tool_results and not halted:
                 return ToolEventGenerationResult(
@@ -247,6 +229,12 @@ class ToolEventGenerator:
                             data=event_data,
                         )
                     )
+
+            if tool_results and not await self._hooks.call_on_tool_batch_executed(
+                context,
+                ToolBatchExecution(calls=tool_calls, results=tool_results, events=events),
+            ):
+                halted = True
 
             return ToolEventGenerationResult(
                 generations=inference_result.batch_generations,
