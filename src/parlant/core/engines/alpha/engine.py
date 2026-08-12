@@ -174,6 +174,14 @@ class AlphaEngine(Engine):
         )
 
     @override
+    async def activate_context(
+        self,
+        context: Context,
+        event_emitter: EventEmitter,
+    ) -> None:
+        await self._load_context(context, event_emitter)
+
+    @override
     async def process(
         self,
         context: Context,

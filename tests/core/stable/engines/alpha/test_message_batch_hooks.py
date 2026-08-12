@@ -14,6 +14,7 @@ from parlant.core.agents import Agent
 from parlant.core.customers import CustomerStore
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.engines.alpha import canned_response_generator as canned_module
+from parlant.core.engines.alpha.engine import AlphaEngine
 from parlant.core.engines.alpha.canned_response_generator import (
     CannedResponseGenerator,
     _CannedResponseSelectionResult,
@@ -53,6 +54,20 @@ def _generation_info() -> GenerationInfo:
         duration=0.0,
         usage=UsageInfo(input_tokens=0, output_tokens=0),
     )
+
+
+async def test_that_engine_can_activate_tool_context_without_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = object.__new__(AlphaEngine)
+    load_context = AsyncMock()
+    monkeypatch.setattr(engine, "_load_context", load_context)
+    context = Context(session_id=cast(Any, "session"), agent_id=cast(Any, "agent"))
+    event_emitter = cast(Any, Mock())
+
+    await engine.activate_context(context, event_emitter)
+
+    load_context.assert_awaited_once_with(context, event_emitter)
 
 
 async def _engine_context(

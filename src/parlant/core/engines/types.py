@@ -42,6 +42,15 @@ class UtteranceRequest:
 
 class Engine(ABC):
     @abstractmethod
+    async def activate_context(
+        self,
+        context: Context,
+        event_emitter: EventEmitter,
+    ) -> None:
+        """Load engine entities and expose them through the current async task context."""
+        ...
+
+    @abstractmethod
     async def process(
         self,
         context: Context,
