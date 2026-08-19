@@ -430,6 +430,18 @@ async def test_that_mode_can_be_updated(
     assert session_dto["mode"] == "manual"
 
 
+async def test_that_processing_cancellation_is_scoped_to_trigger_event(
+    async_client: httpx.AsyncClient,
+    session_id: SessionId,
+) -> None:
+    response = await async_client.post(
+        f"/sessions/{session_id}/processing/cancel",
+        json={"triggerEventId": "not-current"},
+    )
+
+    assert response.raise_for_status().json() == {"status": "not_current"}
+
+
 async def test_that_metadata_can_be_set_on_session_update(
     async_client: httpx.AsyncClient,
     session_id: SessionId,
